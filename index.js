@@ -184,6 +184,30 @@ async function safeAnswerCallback(q, text) {
   }
 }
 
+function isInvalidFileIdError(err) {
+  const desc =
+    err?.response?.body?.description ||
+    err?.response?.description ||
+    err?.message ||
+    "";
+  return /wrong file identifier|file reference has expired|FILE_REFERENCE_EXPIRED/i.test(
+    desc,
+  );
+}
+
+async function dropQuestionImage(testId, qIndex) {
+  if (!testsCol) return;
+  try {
+    const id = typeof testId === "string" ? new ObjectId(testId) : testId;
+    await testsCol.updateOne(
+      { _id: id },
+      { $set: { [`questions.${qIndex}.imageFileId`]: null } },
+    );
+  } catch (err) {
+    // ignore
+  }
+}
+
 function isPrivateChat(chat) {
   return chat?.type === "private";
 }
@@ -1138,6 +1162,7 @@ async function sendQuestionWithImage(
 ) {
   const q = test.questions[index];
   const view = buildQuestionView(test, index, sessionData, settings);
+  const CAPTION_LIMIT = 1024;
 
   if (forceNewMessage && messageId) {
     await clearInlineKeyboard(chatId, messageId);
@@ -1145,37 +1170,120 @@ async function sendQuestionWithImage(
 
   const shouldSendNew = forceNewMessage || !messageId;
 
-  if (q.imageFileId && shouldSendNew) {
-    try {
-      await bot.sendPhoto(chatId, q.imageFileId, {
-        caption: `🧩 <b>${esc(test.title)}</b>\nSavol: <b>${index + 1}/${test.questionCount}</b>`,
-        parse_mode: "HTML",
-        protect_content: true,
-      });
-      const answerText = `${index + 1}) ${esc(q.question)}\n\nA) ${esc(q.options.A)}\nB) ${esc(q.options.B)}\nC) ${esc(q.options.C)}\nD) ${esc(q.options.D)}\n`;
-      await bot.sendMessage(chatId, answerText, {
-        parse_mode: "HTML",
-        protect_content: true,
-        ...view.keyboard,
-      });
-    } catch (err) {
-      await sendOrEdit(
-        chatId,
-        shouldSendNew ? null : messageId,
-        view.text,
-        view.keyboard,
-      );
+  if (q.imageFileId) {
+    const total = test.questionCount;
+    const elapsed = elapsedSeconds(sessionData);
+    const limitInfo = settings?.testTimeLimitEnabled
+      ? ` / ${humanDuration(CONFIG.TEST_TIME_LIMIT_SEC)}`
+      : "";
+    const header = `🧩 <b>${esc(test.title)}</b>\n`;
+    const progress = `Savol: <b>${index + 1}/${total}</b> | Vaqt: <b>${humanDuration(elapsed)}${limitInfo}</b>\n\n`;
+    const questionText = `${index + 1}) ${esc(q.question)}\n\n`;
+    const optionsText = `A) ${esc(q.options.A)}\nB) ${esc(q.options.B)}\nC) ${esc(q.options.C)}\nD) ${esc(q.options.D)}\n`;
+    const answered = sessionData.answers?.[index];
+
+    let captionFull = header + progress + questionText + optionsText;
+    if (answered) {
+      captionFull += `\nTog'ri javob: <b>${answered.correctAnswer}</b>\nSizning javobingiz: <b>${answered.selected}</b>`;
+    }
+    let canUseCaption = captionFull.length <= CAPTION_LIMIT;
+    if (!canUseCaption && answered) {
+      // Drop answer lines to try to fit within caption limits
+      captionFull = header + progress + questionText + optionsText;
+      canUseCaption = captionFull.length <= CAPTION_LIMIT;
+    }
+
+    if (canUseCaption) {
+      if (shouldSendNew) {
+        try {
+          await bot.sendPhoto(chatId, q.imageFileId, {
+            caption: captionFull,
+            parse_mode: "HTML",
+            protect_content: true,
+            ...view.keyboard,
+          });
+        } catch (err) {
+          if (isInvalidFileIdError(err)) {
+            await dropQuestionImage(test._id, index);
+          }
+          // Fallback to text if photo send fails
+          await sendOrEdit(chatId, null, view.text, view.keyboard);
+        }
+        return;
+      }
+
+      try {
+        await bot.editMessageCaption(captionFull, {
+          chat_id: chatId,
+          message_id: messageId,
+          parse_mode: "HTML",
+          reply_markup: view.keyboard.reply_markup,
+        });
+      } catch (err) {
+        await clearInlineKeyboard(chatId, messageId);
+        try {
+          await bot.sendPhoto(chatId, q.imageFileId, {
+            caption: captionFull,
+            parse_mode: "HTML",
+            protect_content: true,
+            ...view.keyboard,
+          });
+        } catch (err2) {
+          if (isInvalidFileIdError(err2)) {
+            await dropQuestionImage(test._id, index);
+          }
+          await sendOrEdit(chatId, null, view.text, view.keyboard);
+        }
+      }
+      return;
+    }
+
+    // Caption too long: send photo with short caption, then question text separately
+    const shortCaption = `🧩 <b>${esc(test.title)}</b>\nSavol: <b>${index + 1}/${total}</b> | Vaqt: <b>${humanDuration(elapsed)}${limitInfo}</b>`;
+
+    if (shouldSendNew) {
+      try {
+        await bot.sendPhoto(chatId, q.imageFileId, {
+          caption: shortCaption,
+          parse_mode: "HTML",
+          protect_content: true,
+        });
+      } catch (err) {
+        if (isInvalidFileIdError(err)) {
+          await dropQuestionImage(test._id, index);
+        }
+        // ignore photo errors and fall back to text only
+      }
+      await sendOrEdit(chatId, null, view.text, view.keyboard);
       if (view.overflowText) {
         await bot.sendMessage(chatId, view.overflowText, {
           parse_mode: "HTML",
           protect_content: true,
         });
       }
+      return;
     }
   } else {
     await sendOrEdit(
       chatId,
       shouldSendNew ? null : messageId,
+      view.text,
+      view.keyboard,
+    );
+    if (view.overflowText) {
+      await bot.sendMessage(chatId, view.overflowText, {
+        parse_mode: "HTML",
+        protect_content: true,
+      });
+    }
+  }
+
+  // For image questions with long captions and existing messageId,
+  // just keep editing the text message (old behavior).
+  if (q.imageFileId && !shouldSendNew) {
+    await sendOrEdit(
+      chatId,
+      messageId,
       view.text,
       view.keyboard,
     );
