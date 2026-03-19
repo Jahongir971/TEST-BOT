@@ -35,7 +35,7 @@ if (!CONFIG.BOT_TOKEN || CONFIG.BOT_TOKEN.startsWith("PASTE_")) {
 }
 
 const bot = new TelegramBot(CONFIG.BOT_TOKEN, {
-  polling: true,
+  polling: false,
   request: { family: 4, timeout: 30000 },
 });
 const mongo = new MongoClient(CONFIG.MONGODB_URI);
@@ -64,7 +64,6 @@ bot.sendPhoto = async (chatId, photo, options) => {
 
 let db, usersCol, testsCol, resultsCol, settingsCol, sessionsCol, logsCol;
 let dbReady = false;
-let dbReadyPromise = Promise.resolve();
 
 bot.on("polling_error", (err) => {
   if (err.code === "EFATAL") {
@@ -183,6 +182,23 @@ async function safeAnswerCallback(q, text) {
   } catch (err) {
     // ignore
   }
+}
+
+function isPrivateChat(chat) {
+  return chat?.type === "private";
+}
+
+async function ensurePrivateChat(q, userId) {
+  if (isPrivateChat(q?.message?.chat)) return true;
+  const warn =
+    "Bu amal uchun bot bilan shaxsiy (private) chatda ishlang.";
+  await safeAnswerCallback(q, warn);
+  try {
+    await bot.sendMessage(userId, warn, { protect_content: true });
+  } catch (err) {
+    // ignore
+  }
+  return false;
 }
 
 function genCode(len) {
@@ -2308,6 +2324,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "add") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           await setSession(userId, { state: "ADMIN_ADD_USER_NAME", data: {} });
           const rows = [
             [{ text: "⬅️ Orqaga", callback_data: "a:users:page:1" }],
@@ -2322,6 +2339,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "search") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           await setSession(userId, { state: "ADMIN_USERS_SEARCH", data: {} });
           const rows = [
             [{ text: "⬅️ Orqaga", callback_data: "a:users:page:1" }],
@@ -2529,6 +2547,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "q" && parts[3] === "edit") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           const testId = parts[4];
           const qIndex = Number(parts[5]);
           await setSession(userId, {
@@ -2553,6 +2572,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "q" && parts[3] === "answer") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           const testId = parts[4];
           const qIndex = Number(parts[5]);
           await setSession(userId, {
@@ -2618,6 +2638,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "q" && parts[3] === "image") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           const testId = parts[4];
           const qIndex = Number(parts[5]);
           await setSession(userId, {
@@ -2720,6 +2741,7 @@ bot.on("callback_query", async (q) => {
           parts[3] === "add" &&
           parts[4] !== "skip-image"
         ) {
+          if (!(await ensurePrivateChat(q, userId))) return;
           const testId = parts[4];
           await setSession(userId, {
             state: "ADMIN_ADD_EXISTING_Q_BLOCK",
@@ -2743,6 +2765,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "add") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           await setSession(userId, { state: "ADMIN_ADD_TEST_TITLE", data: {} });
           const rows = [
             [{ text: "⬅️ Orqaga", callback_data: "a:tests:page:1" }],
@@ -2775,6 +2798,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "edit" && parts[3] === "title") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           const id = parts[4];
           await setSession(userId, {
             state: "ADMIN_TEST_EDIT_TITLE",
@@ -2789,6 +2813,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "edit" && parts[3] === "desc") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           const id = parts[4];
           await setSession(userId, {
             state: "ADMIN_TEST_EDIT_DESC",
@@ -2899,6 +2924,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "one") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           await setSession(userId, { state: "ADMIN_MSG_PICK_USER", data: {} });
           const view = await renderUsersList(1);
           await sendOrEdit(
@@ -2910,6 +2936,7 @@ bot.on("callback_query", async (q) => {
           return;
         }
         if (parts[2] === "all") {
+          if (!(await ensurePrivateChat(q, userId))) return;
           await setSession(userId, { state: "ADMIN_MSG_ALL_TEXT", data: {} });
           await sendOrEdit(
             chatId,
@@ -3029,6 +3056,7 @@ bot.on("callback_query", async (q) => {
     if (data.startsWith("a:settings:")) {
       const key = parts[2];
       if (key === "botname") {
+        if (!(await ensurePrivateChat(q, userId))) return;
         await setSession(userId, { state: "ADMIN_SETTINGS_BOTNAME", data: {} });
         await sendOrEdit(
           chatId,
@@ -3039,6 +3067,7 @@ bot.on("callback_query", async (q) => {
         return;
       }
       if (key === "welcome") {
+        if (!(await ensurePrivateChat(q, userId))) return;
         await setSession(userId, { state: "ADMIN_SETTINGS_WELCOME", data: {} });
         await sendOrEdit(
           chatId,
@@ -3049,6 +3078,7 @@ bot.on("callback_query", async (q) => {
         return;
       }
       if (key === "codelen") {
+        if (!(await ensurePrivateChat(q, userId))) return;
         await setSession(userId, { state: "ADMIN_SETTINGS_CODELEN", data: {} });
         await sendOrEdit(
           chatId,
@@ -3085,6 +3115,7 @@ bot.on("callback_query", async (q) => {
         return;
       }
       if (key === "logchan") {
+        if (!(await ensurePrivateChat(q, userId))) return;
         await setSession(userId, { state: "ADMIN_SETTINGS_LOGCHAN", data: {} });
         await sendOrEdit(
           chatId,
@@ -3400,7 +3431,14 @@ async function init() {
   console.log("Bot started.");
 }
 
-init().catch((err) => {
-  console.error("Init error:", err);
-  process.exit(1);
-});
+async function start() {
+  try {
+    await init();
+    await bot.startPolling();
+  } catch (err) {
+    console.error("Init error:", err);
+    process.exit(1);
+  }
+}
+
+start();
